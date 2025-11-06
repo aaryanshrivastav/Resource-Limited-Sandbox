@@ -12,6 +12,7 @@
 // Apply CPU and memory limits
 void set_limits(int cpu_time, int mem_limit_mb) {
     struct rlimit rl;
+
     rl.rlim_cur = rl.rlim_max = cpu_time;
     setrlimit(RLIMIT_CPU, &rl);
 
@@ -19,7 +20,7 @@ void set_limits(int cpu_time, int mem_limit_mb) {
     setrlimit(RLIMIT_AS, &rl);
 }
 
-// Helper: display file content if it exists and isn’t empty
+// Display file content if it exists
 void print_file(const char *filename, const char *label) {
     FILE *fp = fopen(filename, "r");
     if (!fp) return;
@@ -44,18 +45,21 @@ int run_with_limits(char *cmd[], int cpu_time, int mem_limit_mb) {
     if (pid == 0) {
         // Child process
         if (!freopen("stdout.txt", "w", stdout)) {
-            perror("Failed to redirect stdout");
-            exit(1);
-        }
-        if (!freopen("stderr.txt", "w", stderr)) {
-            perror("Failed to redirect stderr");
-            exit(1);
-        }
+	    perror("Failed to redirect stdout");
+	    exit(1);
+	}
+
+	if (!freopen("stderr.txt", "w", stderr)) {
+	    perror("Failed to redirect stderr");
+	    exit(1);
+	}
+
 
         set_limits(cpu_time, mem_limit_mb);
+
         execvp(cmd[0], cmd);
         perror("execvp failed");
-        exit(1);
+        exit(127); // if exec fails
     } 
     else if (pid > 0) {
         // Parent process
@@ -67,11 +71,10 @@ int run_with_limits(char *cmd[], int cpu_time, int mem_limit_mb) {
         clock_t end = clock();
         double time_used = (double)(end - start) / CLOCKS_PER_SEC;
 
-        // Display captured output and errors
+        // Display output
         print_file("stdout.txt", "Program Output");
         print_file("stderr.txt", "Program Errors");
 
-        // Sandbox summary
         printf("\n=== Sandbox Report ===\n");
         if (WIFEXITED(status))
             printf("Exit Code: %d\n", WEXITSTATUS(status));
@@ -91,31 +94,32 @@ int run_with_limits(char *cmd[], int cpu_time, int mem_limit_mb) {
     }
 }
 
-// Detect language from extension
+// Detect language from file extension
 const char* detect_language(const char *filename) {
-    if (strstr(filename, ".c")) return "c";
     if (strstr(filename, ".cpp")) return "cpp";
+    if (strstr(filename, ".c")) return "c";
     if (strstr(filename, ".py")) return "python";
     if (strstr(filename, ".java")) return "java";
     return "unknown";
 }
 
-// Compile the source file if needed
+// Compile if required
 int compile_program(const char *filename, const char *lang) {
     char cmd[MAX_CMD_LEN];
-    if (strcmp(lang, "c") == 0) {
+
+    if (strcmp(lang, "c") == 0)
         snprintf(cmd, sizeof(cmd), "gcc %s -o program.out 2> compile_error.txt", filename);
-    } else if (strcmp(lang, "cpp") == 0) {
+    else if (strcmp(lang, "cpp") == 0)
         snprintf(cmd, sizeof(cmd), "g++ %s -o program.out 2> compile_error.txt", filename);
-    } else if (strcmp(lang, "java") == 0) {
+    else if (strcmp(lang, "java") == 0)
         snprintf(cmd, sizeof(cmd), "javac %s 2> compile_error.txt", filename);
-    } else {
-        return 0; // No compilation needed for python
-    }
+    else
+        return 0; // no compile step for Python
+
     return system(cmd);
 }
 
-// Run the compiled/interpreted program
+// Execute compiled/interpreted program
 void execute_program(const char *filename, const char *lang) {
     char *cmd[5];
 
@@ -125,19 +129,29 @@ void execute_program(const char *filename, const char *lang) {
         cmd[2] = NULL;
     } 
     else if (strcmp(lang, "java") == 0) {
+        static char classname[128];
+        strncpy(classname, filename, sizeof(classname) - 1);
+        classname[sizeof(classname) - 1] = '\0';
+        char *dot = strrchr(classname, '.');
+        if (dot) *dot = '\0';
+
         cmd[0] = "java";
-        cmd[1] = "Main"; // assumes filename is Main.java
-        cmd[2] = NULL;
+	cmd[1] = "-Xmx512m";
+	cmd[2] = "-XX:-UseCompressedClassPointers";
+	cmd[3] = classname;
+	cmd[4] = NULL;
     } 
     else {
         cmd[0] = "./program.out";
         cmd[1] = NULL;
     }
 
-    run_with_limits(cmd, 2, 64);
+    // JVM needs more memory than C/Python
+    int mem_limit = strcmp(lang, "java") == 0 ? 2048 : 64;
+    run_with_limits(cmd, 2, mem_limit);
 }
 
-// Main entry
+// Entry point
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: ./sandbox <source_file>\n");
